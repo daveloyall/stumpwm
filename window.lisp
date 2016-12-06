@@ -135,10 +135,6 @@ _NET_WM_STATE_DEMANDS_ATTENTION set"
                        (logtest 256 flags)))
         (find-wm-state (window-xwin window) :_NET_WM_STATE_DEMANDS_ATTENTION))))
 
-(defun only-urgent (windows)
-  "Return a list of all urgent windows on SCREEN"
-  (remove-if-not 'window-urgent-p (copy-list windows)))
-
 (defcommand next-urgent () ()
             "Jump to the next urgent window"
             (and (screen-urgent-windows (current-screen))
@@ -905,10 +901,10 @@ needed."
             (member :WM_TAKE_FOCUS (xlib:wm-protocols xwin) :test #'eq))
        (let ((hints (xlib:wm-hints xwin)))
          (when (or (null hints) (eq (xlib:wm-hints-input hints) :on))
-           (screen-set-focus screen window)
-           (update-decoration window)
-           (when cw
-             (update-decoration cw))))
+           (screen-set-focus screen window)))
+       (update-decoration window)
+       (when cw
+         (update-decoration cw))
        (move-window-to-head group window)
        (send-client-message window :WM_PROTOCOLS
                             (xlib:intern-atom *display* :WM_TAKE_FOCUS)

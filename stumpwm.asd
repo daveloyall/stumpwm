@@ -46,6 +46,7 @@
                (:file "message-window")
                (:file "selection")
                (:file "module")
+               (:file "ioloop")
                (:file "stumpwm")
                (:file "user")
                (:file "iresize")
@@ -53,9 +54,9 @@
                (:file "fdump")
                (:file "time")
                (:file "mode-line")
+               (:file "mode-line-formatters")
                (:file "color")
                (:file "wse")
                ;; keep this last so it always gets recompiled if
                ;; anything changes
                (:file "version")))
-
