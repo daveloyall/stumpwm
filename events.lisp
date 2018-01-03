@@ -32,12 +32,16 @@
 (defvar *current-event-time* nil)
 
 (defmacro define-stump-event-handler (event keys &body body)
-  (let ((fn-name (gensym))
-        (event-slots (gensym)))
-    `(labels ((,fn-name (&rest ,event-slots &key ,@keys &allow-other-keys)
-               (declare (ignore ,event-slots))
-               ,@body))
-      (setf (gethash ,event *event-fn-table*) #',fn-name))))
+  (let ((event-slots (gensym)))
+    (multiple-value-bind (body declarations docstring)
+        (parse-body body :documentation t)
+      `(setf (gethash ,event *event-fn-table*)
+             (lambda (&rest ,event-slots &key ,@keys &allow-other-keys)
+               (declare (ignore ,event-slots)
+                        ,@(cdar declarations))
+               ,@(when docstring
+                   (list docstring))
+               ,@body)))))
 
 ;;; Configure request
 
@@ -103,7 +107,10 @@
           (t
            (dformat 1 "Updating Xinerama configuration for ~S.~%" screen)
            (if new-heads
-               (head-force-refresh screen new-heads)
+               (progn (head-force-refresh screen new-heads)
+                      (update-mode-lines screen)
+                      (loop for new-head in new-heads
+                         do (run-hook-with-args *new-head-hook* new-head screen)))
                (dformat 1 "Invalid configuration! ~S~%" new-heads))))))))
 
 (define-stump-event-handler :map-request (parent send-event-p window)
@@ -283,7 +290,7 @@ chunks."
             (screen-last-msg-highlights screen) '())
       (eval-command cmd)
       (xlib:change-property win :stumpwm_command_result
-                            (string-to-bytes (format nil "~{~{~a~%~}~}" (nreverse (screen-last-msg screen))))
+                            (sb-ext:string-to-octets (format nil "~{~{~a~%~}~}" (nreverse (screen-last-msg screen))))
                             :string 8)
       (setf (screen-last-msg screen) msgs
             (screen-last-msg-highlights screen) hlts))
@@ -377,6 +384,20 @@ converted to an atom is removed."
 (define-stump-event-handler :selection-clear (selection)
   (setf (getf *x-selection* selection) nil))
 
+(define-stump-event-handler :selection-notify (window property selection)
+  (dformat 2 "selection-notify: ~s ~s ~s~%" window property selection)
+  (when property
+    (let* ((selection (or selection :primary))
+           (sel-string (utf8-to-string
+                        (xlib:get-property window
+                                           property
+                                           :type :utf8_string
+                                           :result-type 'vector
+                                           :delete-p t))))
+      (when (< 0 (length sel-string))
+        (setf (getf *x-selection* selection) sel-string)
+        (run-hook-with-args *selection-notify-hook* sel-string)))))
+
 (defun find-message-window-screen (win)
   "Return the screen, if any, that message window WIN belongs."
   (dolist (screen *screen-list*)
@@ -458,9 +479,8 @@ converted to an atom is removed."
             (echo-string (window-screen window) (format nil "'~a' denied map request" (window-name window)))
             (echo-string (window-screen window) (format nil "'~a' denied map request in group ~a" (window-name window) (group-name (window-group window))))))
       (frame-raise-window (window-group window) (window-frame window) window
-                          (if (eq (window-frame window)
-                                  (tile-group-current-frame (window-group window)))
-                              t nil))))
+                          (eq (window-frame window)
+                              (tile-group-current-frame (window-group window))))))
 
 (defun maybe-raise-window (window)
   (if (deny-request-p window *deny-raise-request*)
@@ -565,17 +585,25 @@ the window in it's frame."
         (update-all-mode-lines)))))
 
 (define-stump-event-handler :button-press (window code x y child time)
-  (let (screen ml win)
+  (let ((screen (find-screen window))
+        (mode-line (find-mode-line-by-window window))
+        (win (find-window-by-parent window (top-windows))))
     (cond
-      ((and (setf screen (find-screen window)) (not child))
+      ((and screen (not child))
        (group-button-press (screen-current-group screen) x y :root)
        (run-hook-with-args *root-click-hook* screen code x y))
-      ((setf ml (find-mode-line-by-window window))
-       (run-hook-with-args *mode-line-click-hook* ml code x y))
-      ((setf win (find-window-by-parent window (top-windows)))
+      (mode-line
+       (run-hook-with-args *mode-line-click-hook* mode-line code x y))
+      (win
        (group-button-press (window-group win) x y win))))
   ;; Pass click to client
   (xlib:allow-events *display* :replay-pointer time))
+
+(defun make-xlib-window (drawable)
+  "For some reason the CLX xid cache screws up returns pixmaps when
+they should be windows. So use this function to make a window out of DRAWABLE."
+  (xlib::make-window :id (xlib:drawable-id drawable)
+                     :display *display*))
 
 (defun handle-event (&rest event-slots &key display event-key &allow-other-keys)
   (declare (ignore display))
@@ -584,14 +612,14 @@ the window in it's frame."
         (win (getf event-slots :window))
         (*current-event-time* (getf event-slots :time)))
     (when eventfn
-      ;; XXX: In both the clisp and sbcl clx libraries, sometimes what
-      ;; should be a window will be a pixmap instead. In this case, we
-      ;; need to manually translate it to a window to avoid breakage
-      ;; in stumpwm. So far the only slot that seems to be affected is
-      ;; the :window slot for configure-request and reparent-notify
-      ;; events. It appears as though the hash table of XIDs and clx
-      ;; structures gets out of sync with X or perhaps X assigns a
-      ;; duplicate ID for a pixmap and a window.
+      ;; XXX: In sbcl clx libraries, sometimes what should be a window
+      ;; will be a pixmap instead. In this case, we need to manually
+      ;; translate it to a window to avoid breakage in stumpwm. So far
+      ;; the only slot that seems to be affected is the :window slot
+      ;; for configure-request and reparent-notify events. It appears
+      ;; as though the hash table of XIDs and clx structures gets out
+      ;; of sync with X or perhaps X assigns a duplicate ID for a
+      ;; pixmap and a window.
       (when (and win (not (xlib:window-p win)))
         (dformat 10 "Pixmap Workaround! ~s should be a window!~%" win)
         (setf (getf event-slots :window) (make-xlib-window win)))
@@ -606,13 +634,12 @@ the window in it's frame."
               (apply eventfn event-slots))
             (xlib:display-finish-output *display*))
         ((or xlib:window-error xlib:drawable-error) (c)
-          ;; Asynchronous errors are handled in the error
-          ;; handler. Synchronous errors like trying to get the window
-          ;; hints on a deleted window are caught and ignored here. We
-          ;; do this inside the event handler so that the event is
-          ;; handled. If we catch it higher up the event will not be
-          ;; flushed from the queue and we'll get ourselves into an
-          ;; infinite loop.
+          ;; Asynchronous errors are handled in the error handler.
+          ;; Synchronous errors like trying to get the window hints on
+          ;; a deleted window are caught and ignored here. We do this
+          ;; inside the event handler so that the event is handled. If
+          ;; we catch it higher up the event will not be flushed from
+          ;; the queue and we'll get ourselves into an infinite loop.
           (dformat 4 "ignore synchronous ~a~%" c))))
     (dformat 2 "<<< ~S~%" event-key)
     t))

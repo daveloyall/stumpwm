@@ -25,8 +25,6 @@
 
 (in-package :stumpwm)
 
-#+ecl (require "clx")
-
 (export '(*suppress-abort-messages*
           *suppress-frame-indicator*
           *suppress-window-placement-indicator*
@@ -60,6 +58,8 @@
           *mode-line-click-hook*
           *pre-command-hook*
           *post-command-hook*
+          *selection-notify-hook*
+          *menu-selection-hook*
           *display*
           *shell-program*
           *maxsize-border-width*
@@ -69,6 +69,7 @@
           *window-events*
           *window-parent-events*
           *message-window-padding*
+          *message-window-y-padding*
           *message-window-gravity*
           *editor-bindings*
           *input-window-gravity*
@@ -124,10 +125,10 @@
           concat
           data-dir-file
           dformat
-          flatten
           define-frame-preference
           redirect-all-output
           remove-hook
+          remove-all-hooks
           run-hook
           run-hook-with-args
           command-mode-start-message
@@ -171,13 +172,6 @@
           stumpwm-warning))
 
 
-
-(eval-when (:compile-toplevel :load-toplevel :execute)
-  ;; Currently we only support pause-less CALL-IN-MAIN-THREAD for
-  ;; SBCL, since it requires the new io-loop.
-  #+sbcl
-  (pushnew :call-in-main-thread *features*))
-
 ;;; Message Timer
 (defvar *suppress-abort-messages* nil
   "Suppress abort message when non-nil.")
@@ -282,7 +276,7 @@ window group and frame")
 called with 2 arguments: the current frame and the last frame.")
 
 (defvar *new-frame-hook* '()
-  "A hook called when a new frame is created. the hook is called with
+  "A hook called when a new frame is created. The hook is called with
 the frame as an argument.")
 
 (defvar *split-frame-hook* '()
@@ -331,6 +325,18 @@ the command as a symbol.")
 (defvar *post-command-hook* '()
   "Called after a command is called. It is called with 1 argument:
 the command as a symbol.")
+
+(defvar *selection-notify-hook* '()
+  "Called after a :selection-notify event is processed. It is called
+with 1 argument: the selection as a string.")
+
+(defvar *menu-selection-hook* '()
+  "Called after an item is selected in the windows menu. It is called
+with 1 argument: the menu.")
+
+(defvar *new-head-hook* '()
+  "A hook called whenever a head is added. It is called with 2 arguments: the
+ new head and the current screen.")
 
 ;; Data types and globals used by stumpwm
 
@@ -421,6 +427,9 @@ Include only those we are ready to support.")
 ;; Message window variables
 (defvar *message-window-padding* 5
   "The number of pixels that pad the text in the message window.")
+
+(defvar *message-window-y-padding* 0
+  "The number of pixels that pad the text in the message window vertically.")
 
 (defvar *message-window-gravity* :top-right
   "This variable controls where the message window appears. The follow
@@ -668,7 +677,7 @@ chosen, resignal the error."
   (run-hook-with-args hook))
 
 (defmacro add-hook (hook fn)
-  "Add @var{function} to the hook @var{hook-variable}. For example, to
+  "Add @var{function} to the @var{hook-variable}. For example, to
 display a message whenever you switch frames:
 
 @example
@@ -682,6 +691,10 @@ display a message whenever you switch frames:
 (defmacro remove-hook (hook fn)
 "Remove the specified function from the hook."
   `(setf ,hook (remove ,fn ,hook)))
+
+(defmacro remove-all-hooks (hook)
+"Remove all functions from a hook"
+  `(setf ,hook NIL))
 
 ;; Misc. utility functions
 
@@ -769,14 +782,14 @@ string which is split to obtain the individual regexps. "
 (defvar *debug-expose-events* nil
   "Set this variable for a visual indication of expose events on internal StumpWM windows.")
 
-(defvar *debug-stream* *error-output*
+(defvar *debug-stream* (make-synonym-stream '*error-output*)
   "This is the stream debugging output is sent to. It defaults to
 *error-output*. It may be more convenient for you to pipe debugging
 output directly to a file.")
 
 (defun dformat (level fmt &rest args)
   (when (>= *debug-level* level)
-    (multiple-value-bind (sec m h) (decode-universal-time (get-universal-time))
+    (multiple-value-bind (sec m h) (get-decoded-system-time)
       (format *debug-stream* "~2,'0d:~2,'0d:~2,'0d " h m sec))
     ;; strip out non base-char chars quick-n-dirty like
     (write-string (map 'string (lambda (ch)
@@ -867,7 +880,7 @@ with the following formatting options:
 
 @table @asis
 @item %n
-Substitutes the windows number translated via *window-number-map*, if there
+Substitutes the window's number translated via *window-number-map*, if there
 are more windows than *window-number-map* then will use the window-number.
 @item %s
 Substitute the window's status. * means current window, + means last
@@ -887,11 +900,11 @@ size. For instance, @samp{%20t} crops the window's title to 20
 characters.")
 
 (defvar *window-info-format* "%wx%h %n (%t)"
-  "The format used in the info command.
+  "The format used in the info command. See
   @var{*window-format*} for formatting details.")
 
 (defparameter *window-format-by-class* "%m%n %c %s%50t"
-  "The format used in the info winlist-by-class command.
+  "The format used in the info winlist-by-class command. See
  @var{*window-format*} for formatting details.")
 
 (defvar *group-formatters* '((#\n group-map-number)
@@ -983,11 +996,6 @@ raise/map denial messages will be seen.")
                   (apply 'window-matches-properties-p window props))
                 deny-list)
        t)))
-
-(defun flatten (list)
-  "Flatten LIST"
-  (labels ( (mklist (x) (if (listp x) x (list x))) )
-    (mapcan #'(lambda (x) (if (atom x) (mklist x) (flatten x))) list)))
 
 (defun list-splice-replace (item list &rest replacements)
   "splice REPLACEMENTS into LIST where ITEM is, removing

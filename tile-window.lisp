@@ -8,6 +8,9 @@
   "Set this to T if you never want windows to resize based on incremental WM_HINTs,
 like xterm and emacs.")
 
+(defvar *in-visual-pull-p* nil
+  "Whether we are visually pulling a window or not. Used to keep track of state.")
+
 (defclass tile-window (window)
   ((frame   :initarg :frame   :accessor window-frame)
    (normal-size :initform nil :accessor window-normal-size)))
@@ -205,13 +208,17 @@ than the root window's width and height."
 
 ;;;
 
+(defun only-tile-windows (windows)
+  (remove-if-not (lambda (w) (typep w 'tile-window))
+                 windows))
+
 (defun focus-next-window (group)
-  (focus-forward group (sort-windows group)))
+  (focus-forward group (only-tile-windows (sort-windows group))))
 
 (defun focus-prev-window (group)
   (focus-forward group
                  (reverse
-                  (sort-windows group))))
+                  (only-tile-windows (sort-windows group)))))
 
 (defcommand (next tile-group) () ()
   "Go to the next window in the window list."
@@ -283,7 +290,8 @@ frame."
 
 (defun other-hidden-window (group)
   "Return the last window that was accessed and that is hidden."
-  (let ((wins (remove-if (lambda (w) (eq (frame-window (window-frame w)) w)) (group-windows group))))
+  (let ((wins (remove-if (lambda (w) (eq (frame-window (window-frame w)) w))
+                         (only-tile-windows (group-windows group)))))
     (first wins)))
 
 (defun pull-other-hidden-window (group)
@@ -307,12 +315,14 @@ current frame and raise it."
 (defcommand (pull-hidden-next tile-group) () ()
 "Pull the next hidden window into the current frame."
   (let ((group (current-group)))
-    (focus-forward group (sort-windows group) t (lambda (w) (not (eq (frame-window (window-frame w)) w))))))
+    (focus-forward group (only-tile-windows (sort-windows group)) t
+                   (lambda (w) (not (eq (frame-window (window-frame w)) w))))))
 
 (defcommand (pull-hidden-previous tile-group) () ()
 "Pull the next hidden window into the current frame."
   (let ((group (current-group)))
-    (focus-forward group (nreverse (sort-windows group)) t (lambda (w) (not (eq (frame-window (window-frame w)) w))))))
+    (focus-forward group (nreverse (only-tile-windows (sort-windows group))) t
+                   (lambda (w) (not (eq (frame-window (window-frame w)) w))))))
 
 (defcommand (pull-hidden-other tile-group) () ()
 "Pull the last focused, hidden window into the current frame."
@@ -328,6 +338,47 @@ when selecting another window."
                         *window-format*)))
     (when pulled-window
       (pull-window pulled-window))))
+
+(defun pull-selected-window (menu)
+  (let ((selected-window (second
+                          (nth (menu-state-selected menu)
+                               (menu-state-table menu)))))
+    (unless (some (lambda (frame)
+                    (= (window-id (frame-window (if (listp frame) (first frame) frame)))
+                       (window-id selected-window)))
+                  (tile-group-frame-tree (current-group)))
+      (pull-window selected-window))))
+
+(defun restored-windows (pulled-window original-group-windows)
+  (let ((new-group-windows (group-windows (current-group))))
+    (if pulled-window
+        (append (list pulled-window)
+                (remove pulled-window
+                        (mapcar (lambda (window)
+                                  (find-if
+                                   (lambda (w)
+                                     (eq (window-id w) (window-id window)))
+                                   new-group-windows))
+                                original-group-windows)))
+        original-group-windows)))
+
+(add-hook *menu-selection-hook*
+          (lambda (menu)
+            (when *in-visual-pull-p*
+              (pull-selected-window menu))))
+
+(defcommand (visual-pull-from-windowlist tile-group) () ()
+  (setf *in-visual-pull-p* t)
+  (unwind-protect
+       (let ((original-window (current-window))
+             (original-group-windows (group-windows (current-group)))
+             (pulled-window (select-window-from-menu (group-windows (current-group)) *window-format*)))
+         (setf (group-windows (current-group))
+               (restored-windows pulled-window original-group-windows))
+         (when (and (not pulled-window)
+                    (not (= (window-id original-window) (window-id (current-window)))))
+           (pull-window original-window)))
+    (setf *in-visual-pull-p* nil)))
 
 (defun exchange-windows (win1 win2)
   "Exchange the windows in their respective frames."
@@ -365,7 +416,7 @@ when selecting another window."
 
 (defcommand (fullscreen tile-group) () ()
   "Toggle the fullscreen mode of the current widnow. Use this for clients
-with broken (non-NETWM) fullscreen implemenations, such as any program
+with broken (non-NETWM) fullscreen implementations, such as any program
 using SDL."
   (update-fullscreen (current-window) 2))
 
@@ -478,10 +529,10 @@ frame. Possible values are:
 frame and focus the selected window.  The optional argument @var{fmt} can be
 specified to override the default window formatting."
   (let* ((group (current-group))
-	 (frame (tile-group-current-frame group)))
+         (frame (tile-group-current-frame group)))
     (if (null (frame-windows group frame))
-	(message "No Managed Windows")
-	(let ((window (select-window-from-menu (frame-sort-windows group frame) fmt)))
-	  (if window
-	      (group-focus-window group window)
-	      (throw 'error :abort))))))
+        (message "No Managed Windows")
+        (let ((window (select-window-from-menu (frame-sort-windows group frame) fmt)))
+          (if window
+              (group-focus-window group window)
+              (throw 'error :abort))))))

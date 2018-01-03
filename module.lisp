@@ -30,7 +30,7 @@
           *load-path*
           *module-dir*
           init-load-path
-	  set-module-dir
+          set-module-dir
           find-module
           add-to-load-path))
 
@@ -117,7 +117,8 @@ an asdf system, and if so add it to the central registry"
 
 (defcommand load-module (name) ((:module "Load Module: "))
   "Loads the contributed module with the given NAME."
-  (let ((module (find-module name)))
-      (when module
-        (asdf:operate 'asdf:load-op module))))
+  (let ((module (find-module (string-downcase name))))
+    (if module
+        (asdf:operate 'asdf:load-op module)
+        (error "Could not load or find module: ~s" name))))
 ;; End of file

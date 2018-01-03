@@ -91,6 +91,12 @@ may need to sync itself. WHAT-CHANGED is a hint at what changed."))
 (defgeneric really-raise-window (window)
   (:documentation "Really bring the window to the top of the window stack in group"))
 
+
+(defmethod window-group :around ((window window))
+  (if (find window *always-show-windows*)
+      (current-group)
+      (call-next-method)))
+
 ;; Urgency / demands attention
 
 (defun register-urgent-window (window)
@@ -115,12 +121,8 @@ WINDOW"
   (let* ((hints (xlib:wm-hints (window-xwin window)))
          (flags (when hints (xlib:wm-hints-flags hints))))
     (when flags
-      (setf (xlib:wm-hints-flags hints)
-            ;; XXX: as of clisp 2.46 flags is a list, not a number.
-            (if (listp flags)
-                (remove :urgency flags)
-                (logand (lognot 256) flags)))
-      (setf (xlib:wm-hints (window-xwin window)) hints)))
+      (setf (xlib:wm-hints-flags hints) (logand (lognot 256) flags)
+            (xlib:wm-hints (window-xwin window)) hints)))
   (remove-wm-state (window-xwin window) :_NET_WM_STATE_DEMANDS_ATTENTION)
   (unregister-urgent-window window))
 
@@ -129,10 +131,7 @@ WINDOW"
 _NET_WM_STATE_DEMANDS_ATTENTION set"
   (let* ((hints (xlib:wm-hints (window-xwin window)))
          (flags (when hints (xlib:wm-hints-flags hints))))
-    ;; XXX: as of clisp 2.46 flags is a list, not a number.
-    (or (and flags (if (listp flags)
-                       (find :urgency flags)
-                       (logtest 256 flags)))
+    (or (and flags (logtest 256 flags))
         (find-wm-state (window-xwin window) :_NET_WM_STATE_DEMANDS_ATTENTION))))
 
 (defcommand next-urgent () ()
@@ -249,8 +248,10 @@ _NET_WM_STATE_DEMANDS_ATTENTION set"
   (xlib:window-id (window-xwin window)))
 
 (defun window-in-current-group-p (window)
-  (eq (window-group window)
-      (screen-current-group (window-screen window))))
+  (or
+   (find window *always-show-windows*)
+   (eq (window-group window)
+       (screen-current-group (window-screen window)))))
 
 (defun window-screen (window)
   (group-screen (window-group window)))
@@ -353,8 +354,15 @@ _NET_WM_STATE_DEMANDS_ATTENTION set"
     (unhide-window win)
     (update-configuration win))
   (when (window-in-current-group-p win)
-    (setf (xlib:window-priority (window-parent win)) :top-if)))
+    (setf (xlib:window-priority (window-parent win)) :top-if))
+  (raise-top-windows))
 ;; some handy wrappers
+
+(defun raise-top-windows ()
+  (mapc (lambda (w)
+          (when (window-in-current-group-p w)
+            (setf (xlib:window-priority (window-parent w)) :top-if)))
+        (group-on-top-windows (current-group))))
 
 (defun xwin-border-width (win)
   (xlib:drawable-border-width win))
@@ -417,11 +425,11 @@ _NET_WM_STATE_DEMANDS_ATTENTION set"
 (defmethod sort-windows-by-class ((window-list list))
   "Return a copy of the provided window list sorted by class then by number."
   (sort1 window-list (lambda (w1 w2)
-		       (let ((class1 (window-class w1))
-			     (class2 (window-class w2)))
-			 (if (string= class1 class2)
-			     (< (window-number w1) (window-number w2))
-			     (string< class1 class2))))))
+                       (let ((class1 (window-class w1))
+                             (class2 (window-class w2)))
+                         (if (string= class1 class2)
+                           (< (window-number w1) (window-number w2))
+                           (string< class1 class2))))))
 
 (defmethod sort-windows-by-class (group)
   "Return a copy of the provided window list sorted by class then by number."
@@ -683,17 +691,24 @@ and bottom_end_x."
              (let ((key (copy-structure key)))
                (setf (key-shift key) t)
                key))
+           (key-modifiers-exist-p (key)
+             (and
+               (or (not (key-meta key)) (modifiers-meta *modifiers*))
+               (or (not (key-alt key)) (modifiers-alt *modifiers*))
+               (or (not (key-hyper key)) (modifiers-hyper *modifiers*))
+               (or (not (key-super key)) (modifiers-super *modifiers*))))
            (grabit (w key)
-             (loop for code in (multiple-value-list (xlib:keysym->keycodes *display* (key-keysym key))) do
+             (loop for code in (multiple-value-list (xlib:keysym->keycodes *display* (key-keysym key)))
                ;; some keysyms aren't mapped to keycodes so just ignore them.
-               (when code
+               when (and code (key-modifiers-exist-p key))
+               do
                  ;; Some keysyms, such as upper case letters, need the
                  ;; shift modifier to be set in order to grab properly.
                  (let ((key
-                        (if (and (not (eql (key-keysym key) (xlib:keycode->keysym *display* code 0)))
-                                 (eql (key-keysym key) (xlib:keycode->keysym *display* code 1)))
-                            (add-shift-modifier key)
-                            key)))
+                         (if (and (not (eql (key-keysym key) (xlib:keycode->keysym *display* code 0)))
+                                  (eql (key-keysym key) (xlib:keycode->keysym *display* code 1)))
+                           (add-shift-modifier key)
+                           key)))
                    (xlib:grab-key w code
                                   :modifiers (x11-mods key) :owner-p t
                                   :sync-pointer-p nil :sync-keyboard-p nil)
@@ -706,7 +721,7 @@ and bottom_end_x."
                                     :modifiers (x11-mods key t nil) :owner-p t
                                     :sync-pointer-p nil :sync-keyboard-p nil)
                      (xlib:grab-key w code :modifiers (x11-mods key t t) :owner-p t
-                                    :sync-keyboard-p nil :sync-keyboard-p nil)))))))
+                                    :sync-keyboard-p nil :sync-keyboard-p nil))))))
     (dolist (map (dereference-kmaps (top-maps group)))
       (dolist (i (kmap-bindings map))
         (grabit win (binding-key i))))))
@@ -877,6 +892,7 @@ needed."
   "don't focus any window but still read keyboard events."
   (dformat 3 "no-focus~%")
   (let* ((screen (group-screen group)))
+    (setf (group-current-window group) nil)
     (when (eq group (screen-current-group screen))
       (xlib:set-input-focus *display* (screen-focus-window screen) :POINTER-ROOT)
       (setf (screen-focus screen) nil)
@@ -897,26 +913,36 @@ needed."
       ((eq window cw)
        ;; If window to focus is already focused then our work is done.
        )
-      ((and *current-event-time* 
-            (member :WM_TAKE_FOCUS (xlib:wm-protocols xwin) :test #'eq))
+      ;; If a WM_TAKE_FOCUS client message is not sent to the window,
+      ;; widgets in Java applications tend to lose focus when the
+      ;; window gets focused. This is hopefully the right way to
+      ;; handle this.
+      ((member :WM_TAKE_FOCUS (xlib:wm-protocols xwin) :test #'eq)
        (let ((hints (xlib:wm-hints xwin)))
          (when (or (null hints) (eq (xlib:wm-hints-input hints) :on))
            (screen-set-focus screen window)))
+       (setf (group-current-window group) window)
        (update-decoration window)
        (when cw
          (update-decoration cw))
        (move-window-to-head group window)
        (send-client-message window :WM_PROTOCOLS
                             (xlib:intern-atom *display* :WM_TAKE_FOCUS)
-                            *current-event-time*)
+                            ;; From reading the ICCCM spec, it's not
+                            ;; entirely clear that this is the correct
+                            ;; value for time that we send here.
+                            (or *current-event-time* 0))
+       (update-mode-lines (window-screen window))
        (run-hook-with-args *focus-window-hook* window cw))
       (t
        (screen-set-focus screen window)
+       (setf (group-current-window group) window)
        (update-decoration window)
        (when cw
          (update-decoration cw))
        ;; Move the window to the head of the mapped-windows list
        (move-window-to-head group window)
+       (update-mode-lines (window-screen window))
        (run-hook-with-args *focus-window-hook* window cw)))))
 
 (defun xwin-kill (window)
@@ -941,8 +967,8 @@ needed."
 @var{fmt} argument specifies the window formatting used.  Returns the window
 selected."
   (second (select-from-menu (current-screen)
-			    (mapcar (lambda (w)
-				      (list (format-expand *window-formatters* fmt w) w))
+                            (mapcar (lambda (w)
+                                      (list (format-expand *window-formatters* fmt w) w))
                                     windows)
                             prompt
                             (or (position (current-window) windows) 0)  ; Initial selection
@@ -955,6 +981,8 @@ selected."
   "Delete a window. By default delete the current window. This is a
 request sent to the window. The window's client may decide not to
 grant the request or may not be able to if it is unresponsive."
+  (when (find window *always-show-windows*)
+    (disable-always-show-window window (current-screen)))
   (when window
     (send-client-message window :WM_PROTOCOLS (xlib:intern-atom *display* :WM_DELETE_WINDOW))))
 
@@ -1007,7 +1035,7 @@ window. Default to the current window. if
 
 (defcommand other-window (&optional (group (current-group))) ()
   "Switch to the window last focused."
-  (let* ((wins (group-windows group))
+  (let* ((wins (only-tile-windows (group-windows group)))
          ;; the frame could be empty
          (win (if (group-current-window group)
                   (second wins)
@@ -1039,23 +1067,23 @@ is using the number, then the windows swap numbers. Defaults to current group."
 (defcommand repack-window-numbers (&optional preserved) ()
   "Ensure that used window numbers do not have gaps; ignore PRESERVED window numbers."
   (let* ((group (current-group))
-	 (windows (sort-windows group)))
+         (windows (sort-windows group)))
     (loop for w in windows
-	  do (unless (find (window-number w) preserved)
-	       (setf
-		 (window-number w)
-		 (find-free-number
-		   (remove
-		     (window-number w)
-		     (mapcar 'window-number windows))
-		   0))))))
+          do (unless (find (window-number w) preserved)
+               (setf
+                 (window-number w)
+                 (find-free-number
+                   (remove
+                     (window-number w)
+                     (mapcar 'window-number windows))
+                   0))))))
 
 ;; It would make more sense that the window-list argument was before the fmt one
 ;; but window-list was added latter and I didn't want to break other's code.
 (defcommand windowlist (&optional (fmt *window-format*)
                                   window-list) (:rest)
-  "Allow the user to select a window from the list of windows and focus the 
-selected window. For information of menu bindings @xref{Menus}. The optional
+  "Allow the user to select a window from the list of windows and focus the
+selected window. For information of menu bindings see @ref{Menus}. The optional
  argument @var{fmt} can be specified to override the default window formatting.
 The optional argument @var{window-list} can be provided to show a custom window
 list (see @command{windowlist-by-class}). The default window list is the list of
@@ -1063,7 +1091,7 @@ all window in the current group. Also note that the default window list is sorte
 by number and if the @var{windows-list} is provided, it is shown unsorted (as-is)."
   ;; Shadowing the window-list argument.
   (let ((window-list (or window-list
-                         (sort-windows-by-number 
+                         (sort-windows-by-number
                           (group-windows (current-group))))))
     (if (null window-list)
         (message "No Managed Windows")
@@ -1075,7 +1103,7 @@ by number and if the @var{windows-list} is provided, it is shown unsorted (as-is
 
 (defcommand windowlist-by-class (&optional (fmt *window-format-by-class*)) (:rest)
   "Allow the user to select a window from the list of windows (sorted by class)
- and focus the selected window. For information of menu bindings @xref{Menus}. 
+ and focus the selected window. For information of menu bindings see @ref{Menus}.
 The optional argument @var{fmt} can be specified to override the default window
 formatting. This is a simple wrapper around the command @command{windowlist}."
   (windowlist fmt (sort-windows-by-class (group-windows (current-group)))))
@@ -1148,3 +1176,13 @@ be used to override the default window formatting."
     (set-window-geometry window
                          :width w
                          :height h)))
+
+(defcommand toggle-always-on-top () ()
+  "Toggle whether the current window always appears over other windows.
+The order windows are added to this list determines priority."
+  (let ((w (current-window))
+        (windows (group-on-top-windows (current-group))))
+    (when w
+      (if (find w windows)
+          (setf (group-on-top-windows (current-group)) (remove w windows))
+          (push (current-window) (group-on-top-windows (current-group)))))))

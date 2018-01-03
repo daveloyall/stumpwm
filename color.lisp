@@ -42,7 +42,7 @@
 ;;    - :fg and :bg take a color as an argument, which can either be a numeric
 ;;      index into the color map or a hexadecimal color in the form of "#fff"
 ;;      or "#ffffff".
-;;    - :reverse and :bright take either t or nil as an argument. T enables
+;;    - :reverse and :bright take either t or nil as an argument. A t enables
 ;;      the setting and nil disables it.
 ;;    - :push and :pop take no arguments. :push pushes the current settings onto
 ;;      the color stack, leaving the current settings intact. :pop pops color
@@ -382,7 +382,7 @@ rendered width."
        for row from 0 to (length strings)
        for line-height = (max-font-height parts cc)
        if (find row highlights :test 'eql)
-       do (xlib:draw-rectangle px gc 0 y (xlib:drawable-width px) line-height t)
+       do (xlib:draw-rectangle px gc 0 (+ pady y) (xlib:drawable-width px) line-height t)
          (xlib:with-gcontext (gc :foreground (xlib:gcontext-background gc)
                                  :background (xlib:gcontext-foreground gc))
            ;; If we don't switch the default colors, a color operation
