@@ -29,7 +29,10 @@
           set-normal-gravity
           set-maxsize-gravity
           set-transient-gravity
-          set-window-geometry))
+          set-window-geometry
+          find-wm-state
+          add-wm-state
+          remove-wm-state))
 
 (export
   '(window window-xwin window-width window-height window-x window-y
@@ -995,6 +998,25 @@ window. Default to the current window. if
   (when window
     (xwin-kill (window-xwin window))))
 
+(defun kill-windows (windows)
+  "Kill all windows @var{windows}"
+  (dolist (window windows)
+    (xwin-kill (window-xwin window)))) 
+
+(defun kill-windows-in-group (group)
+   "Kill all windows in group @var{group}"
+  (kill-windows (group-windows group)))
+
+(defcommand kill-windows-current-group () ()
+  "Kill all windows in the current group."
+  (kill-windows-in-group (current-group)))
+
+(defcommand kill-windows-other () ()
+  "Kill all windows in current group except the current-window"
+  (let ((target-windows (remove (current-window)
+                                (group-windows (current-group)))))
+    (kill-windows target-windows)))
+
 (defcommand-alias kill kill-window)
 
 (defcommand title (title) ((:rest "Set window's title to: "))
@@ -1090,16 +1112,13 @@ list (see @command{windowlist-by-class}). The default window list is the list of
 all window in the current group. Also note that the default window list is sorted
 by number and if the @var{windows-list} is provided, it is shown unsorted (as-is)."
   ;; Shadowing the window-list argument.
-  (let ((window-list (or window-list
-                         (sort-windows-by-number
-                          (group-windows (current-group))))))
-    (if (null window-list)
-        (message "No Managed Windows")
-        (let ((window (select-window-from-menu window-list fmt)))
-          (if window
-              (group-focus-window (current-group) window)
-              (throw 'error :abort))))))
-
+  (if-let ((window-list (or window-list
+                          (sort-windows-by-number
+                           (group-windows (current-group))))))
+    (if-let ((window (select-window-from-menu window-list fmt)))
+      (group-focus-window (current-group) window)
+      (throw 'error :abort))
+    (message "No Managed Windows")))
 
 (defcommand windowlist-by-class (&optional (fmt *window-format-by-class*)) (:rest)
   "Allow the user to select a window from the list of windows (sorted by class)
@@ -1165,9 +1184,9 @@ be used to override the default window formatting."
 
 (defcommand refresh () ()
   "Refresh current window without changing its size."
-  (let* ((window (current-window))
-         (w (window-width window))
-         (h (window-height window)))
+  (when-let* ((window (current-window))
+              (w (window-width window))
+              (h (window-height window)))
     (set-window-geometry window
                          :width (- w (window-width-inc window))
                          :height (- h (window-height-inc window)))
