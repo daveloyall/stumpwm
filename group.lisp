@@ -42,14 +42,6 @@
 (defvar *always-show-windows* ()
   "The list of windows shown in all groups")
 
-(defclass group ()
-  ((screen :initarg :screen :accessor group-screen)
-   (windows :initform nil :accessor group-windows)
-   (current-window :initform nil :accessor group-current-window)
-   (number :initarg :number :accessor group-number)
-   (name :initarg :name :accessor group-name)
-   (on-top-windows :initform nil :accessor group-on-top-windows)))
-
 ;;; The group API
 (defgeneric group-startup (group)
   (:documentation "Called on all groups while stumpwm is starting up."))
@@ -105,6 +97,14 @@ needs to redraw anything on it, this is where it should do it."))
 (defgeneric group-sync-head (group head)
   (:documentation "When a head or its usable area is resized, this is
 called. When the modeline size changes, this is called."))
+
+(defclass group ()
+  ((screen :initarg :screen :accessor group-screen)
+   (windows :initform nil :accessor group-windows)
+   (current-window :initform nil :accessor group-current-window)
+   (number :initarg :number :accessor group-number)
+   (name :initarg :name :accessor group-name)
+   (on-top-windows :initform nil :accessor group-on-top-windows)))
 
 (defmethod group-delete-window (group window)
   (when (find window *always-show-windows*)
@@ -267,9 +267,8 @@ are found return @code{NIL}."
                          (car groups)
                          ;; Otherwise, use the next one in the list.
                          (cadr matches))))
-    (if (eq next-group current)
-        nil
-        next-group)))
+    (unless (eq next-group current)
+      next-group)))
 
 (defun merge-groups (from-group to-group)
   "Merge all windows in FROM-GROUP into TO-GROUP."
@@ -401,10 +400,14 @@ current group. If @var{name} begins with a dot (``.'') the group new
 group will be created in the hidden state. Hidden groups have group
 numbers less than one and are invisible to from gprev, gnext, and, optionally,
 groups and vgroups commands."
+  (unless name 
+            (throw 'error :abort))  
   (add-group (current-screen) name))
 
 (defcommand gnewbg (name) ((:string "Group Name: "))
   "Create a new group but do not switch to it."
+  (unless name
+            (throw 'error :abort))
   (add-group (current-screen) name :background t))
 
 (defcommand gnext () ()

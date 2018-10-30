@@ -27,7 +27,8 @@
                (:file "input")
                (:file "core")
                (:file "command")
-               (:file "menu")
+               (:file "menu-declarations")
+               (:file "menu-definitions")
                (:file "screen")
                (:file "head")
                (:file "group")
@@ -54,6 +55,9 @@
                (:file "mode-line-formatters")
                (:file "color")
                (:file "wse")
+               (:file "dynamic-window")
+               (:file "remap-keys")
                ;; keep this last so it always gets recompiled if
                ;; anything changes
-               (:file "version")))
+               (:file "version"))
+  :in-order-to ((test-op (test-op "stumpwm-tests"))))

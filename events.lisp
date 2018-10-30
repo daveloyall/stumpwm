@@ -90,28 +90,26 @@
 
 (define-stump-event-handler :configure-request (stack-mode #|parent|# window #|above-sibling|# x y width height border-width value-mask)
   (dformat 3 "CONFIGURE REQUEST ~@{~S ~}~%" stack-mode window x y width height border-width value-mask)
-  (let ((win (find-window window)))
-    (if win
-        (configure-managed-window win x y width height stack-mode value-mask)
-        (configure-unmanaged-window window x y width height border-width value-mask))))
+  (if-let ((win (find-window window)))
+    (configure-managed-window win x y width height stack-mode value-mask)
+    (configure-unmanaged-window window x y width height border-width value-mask)))
 
 (define-stump-event-handler :configure-notify (stack-mode #|parent|# window #|above-sibling|# x y width height border-width value-mask)
   (dformat 4 "CONFIGURE NOTIFY ~@{~S ~}~%" stack-mode window x y width height border-width value-mask)
-  (let ((screen (find-screen window)))
-    (when screen
-      (let ((old-heads (screen-heads screen))
-            (new-heads (make-screen-heads screen (screen-root screen))))
-        (cond
-          ((equalp old-heads new-heads)
-           (dformat 3 "Bogus configure-notify on root window of ~S~%" screen) t)
-          (t
-           (dformat 1 "Updating Xinerama configuration for ~S.~%" screen)
-           (if new-heads
-               (progn (head-force-refresh screen new-heads)
-                      (update-mode-lines screen)
-                      (loop for new-head in new-heads
-                         do (run-hook-with-args *new-head-hook* new-head screen)))
-               (dformat 1 "Invalid configuration! ~S~%" new-heads))))))))
+  (when-let ((screen (find-screen window)))
+    (let ((old-heads (screen-heads screen))
+          (new-heads (make-screen-heads screen (screen-root screen))))
+      (cond
+        ((equalp old-heads new-heads)
+         (dformat 3 "Bogus configure-notify on root window of ~S~%" screen) t)
+        (t
+         (dformat 1 "Updating Xinerama configuration for ~S.~%" screen)
+         (if new-heads
+             (progn (head-force-refresh screen new-heads)
+                    (update-mode-lines screen)
+                    (loop for new-head in new-heads
+                       do (run-hook-with-args *new-head-hook* new-head screen)))
+             (dformat 1 "Invalid configuration! ~S~%" new-heads)))))))
 
 (define-stump-event-handler :map-request (parent send-event-p window)
   (unless send-event-p
@@ -152,15 +150,14 @@
   (dformat 2 "UNMAP: ~s ~s ~a~%" send-event-p (not (xlib:window-equal event-window window)) (find-window window))
   (unless (and (not send-event-p)
                (not (xlib:window-equal event-window window)))
-    (let ((window (find-window window)))
-      ;; if we can't find the window then there's nothing we need to
-      ;; do.
-      (when window
-        (if (plusp (window-unmap-ignores window))
-            (progn
-              (dformat 3 "decrement ignores! ~d~%" (window-unmap-ignores window))
-              (decf (window-unmap-ignores window)))
-            (withdraw-window window))))))
+    ;; if we can't find the window then there's nothing we need to
+    ;; do.
+    (when-let ((window (find-window window)))
+      (if (plusp (window-unmap-ignores window))
+          (progn
+            (dformat 3 "decrement ignores! ~d~%" (window-unmap-ignores window))
+            (decf (window-unmap-ignores window)))
+          (withdraw-window window)))))
 
 (define-stump-event-handler :destroy-notify (send-event-p event-window window)
   (unless (or send-event-p
@@ -168,13 +165,11 @@
     ;; Ignore structure destroy notifies and only
     ;; use substructure destroy notifiers. This way
     ;; event-window is the window's parent.
-    (let ((win (or (find-window window)
-                   (find-withdrawn-window window))))
-      (if win
-          (destroy-window win)
-          (progn
-            (let ((ml (find-mode-line-by-window window)))
-              (when ml (destroy-mode-line ml))))))))
+    (if-let ((win (or (find-window window)
+                      (find-withdrawn-window window))))
+      (destroy-window win)
+      (when-let ((ml (find-mode-line-by-window window)))
+        (destroy-mode-line ml)))))
 
 (defun read-from-keymap (kmaps &optional update-fn)
   "Read a sequence of keys from the user, guided by the keymaps,
@@ -204,14 +199,15 @@ The Caller is responsible for setting up the input focus."
     (when update-fn
       (funcall update-fn key-seq))
     (cond ((kmap-or-kmap-symbol-p match)
-           (when grab
-             (grab-pointer (current-screen)))
-           (let* ((code-state (read-key-no-modifiers))
-                  (code (car code-state))
-                  (state (cdr code-state)))
-             (unwind-protect
-                  (handle-keymap (remove-if-not 'kmap-or-kmap-symbol-p bindings) code state key-seq nil update-fn)
-               (when grab (ungrab-pointer)))))
+           (with-focus (screen-key-window (current-screen))
+             (when grab
+               (grab-pointer (current-screen)))
+             (let* ((code-state (read-key-no-modifiers))
+                    (code (car code-state))
+                    (state (cdr code-state)))
+               (unwind-protect
+                    (handle-keymap (remove-if-not 'kmap-or-kmap-symbol-p bindings) code state key-seq nil update-fn)
+                 (when grab (ungrab-pointer))))))
           (match
            (values match key-seq))
           ((and (find key (list (kbd "?")
@@ -236,10 +232,15 @@ The Caller is responsible for setting up the input focus."
       when (typep group (first i))
       collect (second i))))
 
+(defvar *current-key-seq* nil
+  "The sequence of keys which were used to invoke a command, available
+  within a command definition as a dynamic var binding. Commands may
+  dispatch further based on the value in *current-key-seq*. See the
+  REMAP-KEYS contrib module for a working use case.")
+
 (define-stump-event-handler :key-press (code state #|window|#)
   (labels ((get-cmd (code state)
-             (with-focus (screen-key-window (current-screen))
-               (handle-keymap (top-maps) code state nil t nil))))
+             (handle-keymap (top-maps) code state nil t nil)))
     (unwind-protect
          ;; modifiers can sneak in with a race condition. so avoid that.
          (unless (is-modifier code)
@@ -248,7 +249,9 @@ The Caller is responsible for setting up the input focus."
                ((eq cmd t))
                (cmd
                 (unmap-message-window (current-screen))
-                (eval-command cmd t) t)
+                (let ((*current-key-seq* key-seq))
+                  (eval-command cmd t))
+                t)
                (t (message "~{~a ~}not bound." (mapcar 'print-key (nreverse key-seq))))))))))
 
 (defun bytes-to-window (bytes)
@@ -367,9 +370,8 @@ converted to an atom is removed."
                   screen)
          (handle-stumpwm-commands window))))
     (t
-     (let ((window (find-window window)))
-       (when window
-         (update-window-properties window atom))))))
+     (when-let ((window (find-window window)))
+       (update-window-properties window atom)))))
 
 (define-stump-event-handler :mapping-notify (request start count)
   ;; We could be a bit more intelligent about when to update the
@@ -521,37 +523,34 @@ converted to an atom is removed."
              (focus-all our-window)
              (maybe-raise-window our-window)))))
     (:_NET_CLOSE_WINDOW
-     (let ((our-window (find-window window)))
-       (when our-window
-         (delete-window our-window))))
+     (when-let ((our-window (find-window window)))
+       (delete-window our-window)))
     (:_NET_WM_STATE
-     (let ((our-window (find-window window)))
-       (when our-window
-         (let ((action (elt data 0))
-               (p1 (elt data 1))
-               (p2 (elt data 2)))
-           (dolist (p (list p1 p2))
-             ;; Sometimes the number cannot be converted to an atom, so skip them.
-             (unless (or (= p 0)
-                         (not (typep p '(unsigned-byte 29))))
-               (case (safe-atom-name p)
-                 (:_NET_WM_STATE_DEMANDS_ATTENTION
-                  (case action
-                    (1
-                     (add-wm-state window :_NET_WM_STATE_DEMANDS_ATTENTION))
-                    (2
-                     (unless (find-wm-state window :_NET_WM_STATE_DEMANDS_ATTENTION)
-                       (add-wm-state window :_NET_WM_STATE_DEMANDS_ATTENTION))))
-                  (maybe-set-urgency our-window))
-               (:_NET_WM_STATE_FULLSCREEN
-                (update-fullscreen our-window action)))))))))
+     (when-let ((our-window (find-window window))
+                (action (elt data 0))
+                (p1 (elt data 1))
+                (p2 (elt data 2)))
+       (dolist (p (list p1 p2))
+         ;; Sometimes the number cannot be converted to an atom, so skip them.
+         (unless (or (= p 0)
+                     (not (typep p '(unsigned-byte 29))))
+           (case (safe-atom-name p)
+             (:_NET_WM_STATE_DEMANDS_ATTENTION
+              (case action
+                (1
+                 (add-wm-state window :_NET_WM_STATE_DEMANDS_ATTENTION))
+                (2
+                 (unless (find-wm-state window :_NET_WM_STATE_DEMANDS_ATTENTION)
+                   (add-wm-state window :_NET_WM_STATE_DEMANDS_ATTENTION))))
+              (maybe-set-urgency our-window))
+             (:_NET_WM_STATE_FULLSCREEN
+              (update-fullscreen our-window action)))))))
   (:_NET_MOVERESIZE_WINDOW
-   (let ((our-window (find-window window)))
-     (when our-window
-       (let ((x (elt data 1))
-             (y (elt data 2)))
-         (dformat 3 "!!! Data: ~S~%" data)
-         (group-move-request (window-group our-window) our-window x y :root)))))
+   (when-let ((our-window (find-window window))
+              (x (elt data 1))
+              (y (elt data 2)))
+     (dformat 3 "!!! Data: ~S~%" data)
+     (group-move-request (window-group our-window) our-window x y :root)))
   (t
    (dformat 2 "ignored message~%"))))
 
@@ -602,8 +601,9 @@ the window in it's frame."
 (defun make-xlib-window (drawable)
   "For some reason the CLX xid cache screws up returns pixmaps when
 they should be windows. So use this function to make a window out of DRAWABLE."
-  (xlib::make-window :id (xlib:drawable-id drawable)
-                     :display *display*))
+  (make-instance 'xlib:window
+                 :id (xlib:drawable-id drawable)
+                 :display *display*))
 
 (defun handle-event (&rest event-slots &key display event-key &allow-other-keys)
   (declare (ignore display))
