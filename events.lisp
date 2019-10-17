@@ -45,12 +45,12 @@
 
 ;;; Configure request
 
-(flet ((has-x (mask) (= 1 (logand mask 1)))
-       (has-y (mask) (= 2 (logand mask 2)))
-       (has-w (mask) (= 4 (logand mask 4)))
-       (has-h (mask) (= 8 (logand mask 8)))
-       (has-bw (mask) (= 16 (logand mask 16)))
-       (has-stackmode (mask) (= 64 (logand mask 64))))
+(flet ((has-x (mask) (logbitp 0 mask))
+       (has-y (mask) (logbitp 1 mask))
+       (has-w (mask) (logbitp 2 mask))
+       (has-h (mask) (logbitp 3 mask))
+       (has-bw (mask) (logbitp 4 mask))
+       (has-stackmode (mask) (logbitp 6 mask)))
   (defun configure-managed-window (win x y width height stack-mode value-mask)
     ;; Grant the configure request but then maximize the window after the
     ;; granting.
@@ -103,12 +103,10 @@
         ((equalp old-heads new-heads)
          (dformat 3 "Bogus configure-notify on root window of ~S~%" screen) t)
         (t
-         (dformat 1 "Updating Xinerama configuration for ~S.~%" screen)
+         (dformat 1 "Updating Xrandr or Xinerama configuration for ~S.~%" screen)
          (if new-heads
              (progn (head-force-refresh screen new-heads)
-                    (update-mode-lines screen)
-                    (loop for new-head in new-heads
-                       do (run-hook-with-args *new-head-hook* new-head screen)))
+                    (update-mode-lines screen))
              (dformat 1 "Invalid configuration! ~S~%" new-heads)))))))
 
 (define-stump-event-handler :map-request (parent send-event-p window)
@@ -199,15 +197,14 @@ The Caller is responsible for setting up the input focus."
     (when update-fn
       (funcall update-fn key-seq))
     (cond ((kmap-or-kmap-symbol-p match)
-           (with-focus (screen-key-window (current-screen))
-             (when grab
-               (grab-pointer (current-screen)))
-             (let* ((code-state (read-key-no-modifiers))
-                    (code (car code-state))
-                    (state (cdr code-state)))
-               (unwind-protect
-                    (handle-keymap (remove-if-not 'kmap-or-kmap-symbol-p bindings) code state key-seq nil update-fn)
-                 (when grab (ungrab-pointer))))))
+           (when grab
+             (grab-pointer (current-screen)))
+           (let* ((code-state (read-key-no-modifiers))
+                  (code (car code-state))
+                  (state (cdr code-state)))
+             (unwind-protect
+                  (handle-keymap (remove-if-not 'kmap-or-kmap-symbol-p bindings) code state key-seq nil update-fn)
+               (when grab (ungrab-pointer)))))
           (match
            (values match key-seq))
           ((and (find key (list (kbd "?")
@@ -238,30 +235,37 @@ The Caller is responsible for setting up the input focus."
   dispatch further based on the value in *current-key-seq*. See the
   REMAP-KEYS contrib module for a working use case.")
 
+(defvar *custom-key-event-handler* nil
+  "A custom key event handler can be set in this variable,
+  which will take precedence over the keymap based handler defined in
+  the default :KEY-PRESS event handler.")
+
 (define-stump-event-handler :key-press (code state #|window|#)
   (labels ((get-cmd (code state)
-             (handle-keymap (top-maps) code state nil t nil)))
+             (with-focus (screen-key-window (current-screen))
+               (handle-keymap (top-maps) code state nil t nil))))
     (unwind-protect
-         ;; modifiers can sneak in with a race condition. so avoid that.
-         (unless (is-modifier code)
-           (multiple-value-bind (cmd key-seq) (get-cmd code state)
-             (cond
-               ((eq cmd t))
-               (cmd
-                (unmap-message-window (current-screen))
-                (let ((*current-key-seq* key-seq))
-                  (eval-command cmd t))
-                t)
-               (t (message "~{~a ~}not bound." (mapcar 'print-key (nreverse key-seq))))))))))
+         (or (and *custom-key-event-handler*
+                  (funcall *custom-key-event-handler* code state))
+             ;; modifiers can sneak in with a race condition. so avoid that.
+             (unless (is-modifier code)
+               (multiple-value-bind (cmd key-seq) (get-cmd code state)
+                 (cond
+                   ((eq cmd t))
+                   (cmd
+                    (unmap-message-window (current-screen))
+                    (let ((*current-key-seq* key-seq))
+                      (eval-command cmd t))
+                    t)
+                   (t (message "~{~a ~}not bound." (mapcar 'print-key (nreverse key-seq)))))))))))
 
 (defun bytes-to-window (bytes)
-  "A sick hack to assemble 4 bytes into a 32 bit number. This is
-because ratpoison sends the rp_command_request window in 8 byte
-chunks."
-  (+ (first bytes)
-     (ash (second bytes) 8)
-     (ash (third bytes) 16)
-     (ash (fourth bytes) 24)))
+  "Combine a list of 4 8-bit bytes into a 32-bit number. This is because
+ratpoison sends the rp_command_request window in 8 byte chunks."
+  (logior (first bytes)
+          (ash (second bytes) 8)
+          (ash (third bytes) 16)
+          (ash (fourth bytes) 24)))
 
 (defun handle-rp-commands (root)
   "Handle a ratpoison style command request."
@@ -284,8 +288,8 @@ chunks."
   "Handle a StumpWM style command request."
   (let* ((win root)
          (screen (find-screen root))
-         (data (xlib:get-property win :stumpwm_command :delete-p t))
-         (cmd (bytes-to-string data)))
+         (data (xlib:get-property win :stumpwm_command :delete-p t :result-type '(vector (unsigned-byte 8))))
+         (cmd (utf8-to-string data)))
     (let ((msgs (screen-last-msg screen))
           (hlts (screen-last-msg-highlights screen))
           (*executing-stumpwm-command* t))
@@ -480,9 +484,11 @@ converted to an atom is removed."
         (if (eq (window-group window) (current-group))
             (echo-string (window-screen window) (format nil "'~a' denied map request" (window-name window)))
             (echo-string (window-screen window) (format nil "'~a' denied map request in group ~a" (window-name window) (group-name (window-group window))))))
-      (frame-raise-window (window-group window) (window-frame window) window
-                          (eq (window-frame window)
-                              (tile-group-current-frame (window-group window))))))
+      (if (typep window 'tile-window)
+          (frame-raise-window (window-group window) (window-frame window) window
+                              (eq (window-frame window)
+                                  (tile-group-current-frame (window-group window))))
+          (raise-window window))))
 
 (defun maybe-raise-window (window)
   (if (deny-request-p window *deny-raise-request*)
@@ -583,18 +589,38 @@ the window in it's frame."
         (focus-all win)
         (update-all-mode-lines)))))
 
+(defun decode-button-code (code)
+  "Translate the mouse button number into a more readable format"
+  (ecase code
+    (1 :left-button)
+    (2 :middle-button)
+    (3 :right-button)
+    (4 :wheel-up)
+    (5 :wheel-down)
+    (6 :wheel-left)
+    (7 :wheel-right)
+    (8 :browser-back)
+    (9 :browser-front)))
+
+(defun scroll-button-keyword-p (button)
+  "Checks if button keyword is generated from the scroll wheel."
+  (or (eq button :wheel-down) (eq button :wheel-up)
+      (eq button :wheel-left) (eq button :wheel-right)))
+
 (define-stump-event-handler :button-press (window code x y child time)
-  (let ((screen (find-screen window))
+  (let ((button (decode-button-code code))
+        (screen (find-screen window))
         (mode-line (find-mode-line-by-window window))
         (win (find-window-by-parent window (top-windows))))
+    (run-hook-with-args *click-hook* screen code x y)
     (cond
       ((and screen (not child))
-       (group-button-press (screen-current-group screen) x y :root)
+       (group-button-press (screen-current-group screen) button x y :root)
        (run-hook-with-args *root-click-hook* screen code x y))
       (mode-line
        (run-hook-with-args *mode-line-click-hook* mode-line code x y))
       (win
-       (group-button-press (window-group win) x y win))))
+       (group-button-press (window-group win) button x y win))))
   ;; Pass click to client
   (xlib:allow-events *display* :replay-pointer time))
 

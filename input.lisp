@@ -24,6 +24,7 @@
 (in-package :stumpwm)
 
 (export '(*input-history-ignore-duplicates*
+          *input-completion-style*
           *input-map*
           *numpad-map*
           completing-read
@@ -37,8 +38,87 @@
           read-one-char
           read-one-line))
 
+
+;;; General Utilities
+
+(defun take (n list)
+  "Returns a list with the first n elements of the given list."
+  (loop repeat n
+        for x in list
+        collect x))
+
+;; This could use a much more efficient algorithm.
+;; But for our purposes with small lists it's likely ok.
+(defun longest-common-prefix (seqs &key (test #'eql))
+  "Returns the length of the longest common prefix of the sequences."
+  (flet ((longest-common-prefix-2 (seq1 seq2)
+           (if-let ((i (mismatch seq1 seq2 :test test)))
+             i
+             (length seq1))))
+    (apply #'min (map-product #'longest-common-prefix-2 seqs seqs))))
+
+
 (defstruct input-line
   string position history history-bk password)
+
+
+;;; completion styles
+
+(defgeneric input-completion-reset (completion-style completions)
+  (:documentation "A completion style should implement this function
+and reset its state when called."))
+
+(defgeneric input-completion-complete (completion-style input direction)
+  (:documentation "A completion style should implement this function
+and complete the input by mutating it."))
+
+(defclass input-completion-style-cyclic ()
+  ((completions :initform nil :type list)
+   (idx :initform 0 :type fixnum)))
+
+(defmethod input-completion-reset ((cs input-completion-style-cyclic) completions)
+  (setf (slot-value cs 'completions) completions
+        (slot-value cs 'idx) 0))
+
+(defmethod input-completion-complete ((cs input-completion-style-cyclic) input direction)
+  (with-slots (completions idx) cs
+    (let ((completion-count (length completions)))
+      (if completions
+          (progn
+            (let ((elt (nth idx completions)))
+              (input-delete-region input 0 (input-point input))
+              (input-insert-string input (if (listp elt) (first elt) elt))
+              (input-insert-char input #\Space))
+            ;; Prepare the next completion
+            (setf idx (mod (+ idx (if (eq direction :forward) 1 -1)) completion-count))
+          :error)))))
+
+(defun make-input-completion-style-cyclic ()
+  (make-instance 'input-completion-style-cyclic))
+
+(defclass input-completion-style-unambiguous ()
+  ((display-limit :initarg :display-limit :initform 64 :type fixnum)
+   (completions :initform nil :type list)))
+
+(defmethod input-completion-reset ((cs input-completion-style-unambiguous) completions)
+  (setf (slot-value cs 'completions)
+        (take (slot-value cs 'display-limit) completions)))
+
+(defmethod input-completion-complete ((cs input-completion-style-unambiguous) input direction)
+  (declare (ignore direction))
+  (with-slots (completions) cs
+    (if (null completions)
+        :error
+        (let ((n (longest-common-prefix completions)))
+          (input-delete-region input 0 (input-point input))
+          (input-insert-string input (subseq (first completions) 0 n))
+          (if (null (rest completions))
+              (unmap-message-window (current-screen))
+              (echo-string-list (current-screen) completions))))))
+
+(defun make-input-completion-style-unambiguous (&key (display-limit 64))
+  (make-instance 'input-completion-style-unambiguous
+                 :display-limit display-limit))
 
 (defvar *input-map*
   (let ((map (make-sparse-keymap)))
@@ -78,17 +158,24 @@
 (defvar *input-history* nil
   "History for the input line.")
 
+(defvar *input-shell-history* nil
+  "History for shell lines.")
+
 (defvar *input-last-command* nil
   "The last input command.")
 
 (defvar *input-completions* nil
   "The list of completions")
 
-(defvar *input-current-completions* nil
-  "The list of matching completions.")
-
-(defvar *input-current-completions-idx* nil
-  "The current index in the current completions list.")
+(defvar *input-completion-style* (make-input-completion-style-cyclic)
+  "The completion style to use.
+A completion style has to implement input-completion-reset
+and input-completion-complete.
+Available completion styles include
+@table @asis
+@item make-input-completion-style-cyclic
+@item make-input-completion-style-unambiguous
+@end table")
 
 (defvar *input-history-ignore-duplicates* nil
   "Do not add a command to the input history if it's already the first in the list.")
@@ -122,14 +209,11 @@
       (setf (xlib:window-priority win) :above
             (xlib:drawable-height win) height))
     (xlib:map-window win)
-    ;; Draw the prompt
-    (draw-input-bucket screen prompt input)
-    ;; Ready to recieve input
-    ))
+    (draw-input-bucket screen prompt input)))
 
 (defun shutdown-input-window (screen)
-  (xlib:ungrab-keyboard *display*)
   (xlib:unmap-window (screen-input-window screen)))
+
 ;; Hack to avoid clobbering input from numpads with numlock on.
 (defun input-handle-key-press-event (&rest event-slots
                                      &key event-key code state
@@ -224,22 +308,23 @@ passed the substring to complete on and is expected to return a list
 of matches. If require-match argument is non-nil then the input must
 match with an element of the completions."
   (check-type completions (or list function symbol))
-  (let ((*input-completions* completions)
-        (*input-current-completions* nil)
-        (*input-current-completions-idx* nil))
-    (let ((line (read-one-line screen prompt :initial-input initial-input :require-match require-match)))
-      (when line (string-trim " " line)))))
+  (let ((line (read-one-line screen prompt
+                             :completions completions
+                             :initial-input initial-input
+                             :require-match require-match)))
+    (when line (string-trim " " line))))
 
-(defun read-one-line (screen prompt &key (initial-input "") require-match password)
+(defun read-one-line (screen prompt &key completions (initial-input "") require-match password)
   "Read a line of input through stumpwm and return it. Returns nil if the user aborted."
   (let ((*input-last-command* nil)
+        (*input-completions* completions)
         (input (make-input-line :string (make-input-string initial-input)
                                 :position (length initial-input)
                                 :history -1
                                 :password password)))
     (labels ((match-input ()
                (let* ((in (string-trim " " (input-line-string input)))
-                      (compls (input-find-completions in *input-completions*)))
+                      (compls (input-find-completions in completions)))
                  (and (consp compls)
                       (string= in (if (consp (car compls))
                                       (caar compls)
@@ -292,12 +377,8 @@ match with an element of the completions."
          (font (screen-font screen))
          (prompt-lines (ppcre:split #\Newline prompt))
          (prompt-lines-length (length prompt-lines))
-         (prompt-width (apply #'max
-                              (mapcar (lambda (line)
-                                        (text-line-width font
-                                                         line
-                                                         :translate #'translate-id))
-                                      prompt-lines)))
+         (prompt-width (loop :for line :in prompt-lines
+                             :maximize (text-line-width font line :translate #'translate-id)))
          (prompt-offset (text-line-width font
                                          (first (last prompt-lines))
                                          :translate #'translate-id))
@@ -489,29 +570,10 @@ functions are passed this structure as their first argument."
                      completions)))
 
 (defun input-complete (input direction)
-  ;; reset the completion list if this is the first time they're
-  ;; trying to complete.
   (unless (find *input-last-command* '(input-complete-forward
                                        input-complete-backward))
-    (setf *input-current-completions* (input-find-completions (input-substring input 0 (input-point input)) *input-completions*)
-          *input-current-completions-idx* -1))
-  (if *input-current-completions*
-      (progn
-        ;; Insert the next completion
-        (input-delete-region input 0 (input-point input))
-        (if (eq direction :forward)
-            (progn
-              (incf *input-current-completions-idx*)
-              (when (>= *input-current-completions-idx* (length *input-current-completions*))
-                (setf *input-current-completions-idx* 0)))
-            (progn
-              (decf *input-current-completions-idx*)
-              (when (< *input-current-completions-idx* 0)
-                (setf *input-current-completions-idx* (1- (length *input-current-completions*))))))
-        (let ((elt (nth *input-current-completions-idx* *input-current-completions*)))
-          (input-insert-string input (if (listp elt) (first elt) elt))
-          (input-insert-char input #\Space)))
-      :error))
+    (input-completion-reset *input-completion-style* (input-find-completions (input-substring input 0 (input-point input)) *input-completions*)))
+  (input-completion-complete *input-completion-style* input direction))
 
 (defun input-complete-forward (input key)
   (declare (ignore key))
@@ -690,21 +752,14 @@ input (pressing Return), nil otherwise."
        nil))))
 
 (defun all-modifier-codes ()
-  (multiple-value-bind
-        (shift-codes lock-codes control-codes mod1-codes mod2-codes mod3-codes mod4-codes mod5-codes)
-      (xlib:modifier-mapping *display*)
-    (append shift-codes
-            lock-codes
-            control-codes
-            mod1-codes
-            mod2-codes
-            mod3-codes
-            mod4-codes
-            mod5-codes)))
+  "Return all the keycodes that are associated with a modifier."
+  (flatten (multiple-value-list (xlib:modifier-mapping *display*))))
 
 (defun get-modifier-map ()
   (labels ((find-mod (mod codes)
-             (find (xlib:keysym->keycodes *display* (keysym-name->keysym mod)) codes)))
+             (let* ((keysym (keysym-name->keysym mod))
+                    (keycodes (multiple-value-list (xlib:keysym->keycodes *display* keysym))))
+               (intersection keycodes codes))))
     (let ((modifiers (make-modifiers)))
       (multiple-value-bind
             (shift-codes lock-codes control-codes mod1-codes mod2-codes mod3-codes mod4-codes mod5-codes)
@@ -778,8 +833,12 @@ user presses 'y'"
 (defun yes-or-no-p (message)
   "ask a \"yes or no\" question on the current screen and return T if the
 user presses 'yes'"
-  (loop for line = (read-one-line (current-screen)
-                                  (format nil "~a(yes or no) " message))
+  (loop for line = (string-trim
+                    '(#\Space)
+                    (read-one-line (current-screen)
+                                   (format nil "~a(yes or no) " message)
+                                   :completions
+                                   '("yes" "no")))
         until (find line '("yes" "no") :test 'string-equal)
         do (message "Please answer yes or no")
            (sleep 1)

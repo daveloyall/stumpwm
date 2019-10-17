@@ -62,6 +62,8 @@ function is called. This call is expected to set the focus."))
 function is called."))
 (defgeneric group-current-window (group)
   (:documentation "The group is asked to return its focused window."))
+(defgeneric group-raised-window (group)
+  (:documentation "The group is asked to return its topmost window."))
 (defgeneric group-current-head (group)
   (:documentation "The group is asked to return its current head."))
 (defgeneric group-resize-request (group window width height)
@@ -81,7 +83,7 @@ about it."))
   (:documentation "The group is asked to in some way show the user where the keyboard focus is."))
 (defgeneric group-focus-window (group win)
   (:documentation "The group is asked to focus the specified window wherever it is."))
-(defgeneric group-button-press (group x y child)
+(defgeneric group-button-press (group button x y child)
   (:documentation "The user clicked somewhere in the group."))
 (defgeneric group-root-exposure (group)
   (:documentation "The root window got an exposure event. If the group
@@ -102,6 +104,7 @@ called. When the modeline size changes, this is called."))
   ((screen :initarg :screen :accessor group-screen)
    (windows :initform nil :accessor group-windows)
    (current-window :initform nil :accessor group-current-window)
+   (raised-window :initform nil :accessor group-raised-window)
    (number :initarg :number :accessor group-number)
    (name :initarg :name :accessor group-name)
    (on-top-windows :initform nil :accessor group-on-top-windows)))
@@ -295,16 +298,19 @@ there exists one."
                                 +netwm-allowed-actions+)
                         :atom 32))
 
+(defun netwm-update-group (group index)
+  (dolist (w (group-windows group))
+    (xlib:change-property (window-xwin w) :_NET_WM_DESKTOP
+                          (list index)
+                          :cardinal 32)))
+
 (defun netwm-update-groups (screen)
-  "update all windows to reflect a change in the group list."
+  "Update all windows to reflect a change in the group list."
   ;; FIXME: This could be optimized only to update windows when there
   ;; is a need.
   (loop for i from 0
         for group in (sort-groups screen)
-        do (dolist (w (group-windows group))
-             (xlib:change-property (window-xwin w) :_NET_WM_DESKTOP
-                                   (list i)
-                                   :cardinal 32))))
+        do (netwm-update-group group i)))
 
 (defun netwm-set-group-properties (screen)
   "Set NETWM properties regarding groups of SCREEN.
@@ -361,7 +367,7 @@ Groups are known as \"virtual desktops\" in the NETWM standard."
     numbers."
   (check-type screen screen)
   (check-type name string)
-  (assert (not (member name '("" ".") :test #'string=)) nil "Groups must have a name~%")
+  (assert (not (member name '("" ".") :test #'string=)) (name) "Groups must have a name.")
   (let ((group (%ensure-group name type screen)))
     (unless background
       (switch-to-group group))
@@ -382,9 +388,9 @@ Groups are known as \"virtual desktops\" in the NETWM standard."
 (defun group-forward (current list)
   "Switch to the next non-hidden-group in the list, if one
 exists. Returns the new group."
-  (when-let ((ng (next-group current (non-hidden-groups list))))
-    (switch-to-group ng)
-    ng))
+  (when-let ((next (next-group current (non-hidden-groups list))))
+    (switch-to-group next)
+    next))
 
 (defun group-forward-with-window (current list)
   "Switch to the next group in the list, if one exists, and moves the
@@ -401,13 +407,13 @@ group will be created in the hidden state. Hidden groups have group
 numbers less than one and are invisible to from gprev, gnext, and, optionally,
 groups and vgroups commands."
   (unless name 
-            (throw 'error :abort))  
+    (throw 'error :abort))
   (add-group (current-screen) name))
 
 (defcommand gnewbg (name) ((:string "Group Name: "))
   "Create a new group but do not switch to it."
   (unless name
-            (throw 'error :abort))
+    (throw 'error :abort))
   (add-group (current-screen) name :background t))
 
 (defcommand gnext () ()
@@ -438,22 +444,26 @@ window along."
     (when (> (length groups) 1)
       (switch-to-group (second groups)))))
 
+(defun %grename (name group)
+  (let ((group-name (group-name group)))
+    (cond ((and (starts-with #\. name) ; change to hidden group
+                (not (starts-with #\. group-name)))
+           (setf (group-number group)
+                 (find-free-hidden-group-number (current-screen))))
+          ((and (not (starts-with #\. name)) ; change from hidden group
+                (starts-with #\. group-name))
+           (setf (group-number group)
+                 (find-free-group-number (current-screen))))))
+       (setf (group-name group) name))
+
 (defcommand grename (name) ((:string "New name for group: "))
   "Rename the current group."
-  (let ((group (current-group)))
-    (cond ((find-group (current-screen) name)
-           (message "^1*^BError: Name already exists"))
-          ((or (zerop (length name))
-               (string= name "."))
-           (message "^1*^BError: empty name"))
-          (t
-           (cond ((and (char= (char name 0) #\.) ;change to hidden group
-                       (not (char= (char (group-name group) 0) #\.)))
-                  (setf (group-number group) (find-free-hidden-group-number (current-screen))))
-                 ((and (not (char= (char name 0) #\.)) ;change from hidden group
-                       (char= (char (group-name group) 0) #\.))
-                  (setf (group-number group) (find-free-group-number (current-screen)))))
-           (setf (group-name group) name)))))
+  (cond ((find-group (current-screen) name)
+         (message "^1*^BError: Name already exists"))
+        ((or (zerop (length name))
+             (string= name "."))
+         (message "^1*^BError: Name cannot be empty name"))
+        (t (%grename name (current-group)))))
 
 (defun echo-groups (screen fmt &optional verbose (wfmt *window-format*))
   "Print a list of the windows to the screen."
